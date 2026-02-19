@@ -1,0 +1,5 @@
+{
+  "name": "TerSeg",
+  "description": "Advanced Mean Shift segmentation tool for satellite imagery. Analyze land plots, simplify complex terrains into mean-colored segments, and export high-quality geospatial visualizations.",
+  "requestFramePermissions": []
+}

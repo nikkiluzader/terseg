@@ -125,6 +125,83 @@
         </div>
       </div>
 
+      <!-- Road Overlay Settings -->
+      <div class="space-y-6">
+        <div class="flex items-center gap-2 text-slate-400 font-bold text-xs uppercase tracking-wider">
+          <Route class="w-4 h-4" />
+          Road Overlay
+        </div>
+
+        <div class="space-y-4">
+          <!-- Upload Road Mask -->
+          <div class="space-y-2">
+            <input type="file" class="hidden" accept="image/png" ref="roadFileInput" @change="handleRoadUpload" />
+            <div class="flex items-center gap-2">
+              <button
+                @click="$refs.roadFileInput?.click()"
+                class="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-medium text-slate-300 transition-colors"
+              >
+                <Upload class="w-3.5 h-3.5" />
+                {{ roadSettings.hasRoadMask ? 'Replace Mask' : 'Upload Road Mask' }}
+              </button>
+              <button
+                v-if="roadSettings.hasRoadMask"
+                @click="clearRoadMask"
+                class="p-2 bg-slate-800 hover:bg-red-900/40 border border-slate-700 rounded-lg text-slate-400 hover:text-red-400 transition-colors"
+                title="Remove road overlay"
+              >
+                <X class="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <p class="text-[10px] text-slate-500">16-bit PNG mask: white roads on black background.</p>
+          </div>
+
+          <!-- Road Opacity -->
+          <div v-if="roadSettings.hasRoadMask" class="space-y-2">
+            <div class="flex justify-between text-xs font-medium">
+              <label class="text-slate-300">Road Opacity</label>
+              <span class="text-blue-400">{{ Math.round(roadSettings.opacity * 100) }}%</span>
+            </div>
+            <input
+              type="range" :min="0" :max="1" :step="0.05"
+              :value="roadSettings.opacity"
+              @input="updateRoadSetting('opacity', parseFloat($event.target.value))"
+              class="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+            />
+          </div>
+
+          <!-- Road Color -->
+          <div v-if="roadSettings.hasRoadMask" class="space-y-2">
+            <div class="text-xs font-medium text-slate-300">Road Color</div>
+            <div class="flex gap-2 flex-wrap">
+              <button
+                v-for="c in roadColorPresets" :key="c.value"
+                @click="updateRoadSetting('color', c.value)"
+                class="w-7 h-7 rounded-lg border-2 transition-all"
+                :class="roadSettings.color === c.value ? 'border-blue-400 scale-110' : 'border-slate-600 hover:border-slate-400'"
+                :style="{ backgroundColor: c.value }"
+                :title="c.label"
+              />
+            </div>
+          </div>
+
+          <!-- Road Width -->
+          <div v-if="roadSettings.hasRoadMask" class="space-y-2">
+            <div class="flex justify-between text-xs font-medium">
+              <label class="text-slate-300">Road Width</label>
+              <span class="text-blue-400">{{ roadSettings.width }}px</span>
+            </div>
+            <input
+              type="range" :min="1" :max="8" :step="1"
+              :value="roadSettings.width"
+              @input="updateRoadSetting('width', parseInt($event.target.value))"
+              class="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+            />
+            <p class="text-[10px] text-slate-500">Dilate road lines for visibility. 1 = original mask size.</p>
+          </div>
+        </div>
+      </div>
+
       <!-- Processing Status -->
       <div
         v-if="isProcessing"
@@ -149,7 +226,8 @@
 </template>
 
 <script setup>
-import { Sliders, Info } from 'lucide-vue-next'
+import { ref } from 'vue'
+import { Sliders, Info, Route, Upload, X } from 'lucide-vue-next'
 
 const props = defineProps({
   params: {
@@ -163,12 +241,47 @@ const props = defineProps({
   imageDimensions: {
     type: Object,
     default: null
+  },
+  roadSettings: {
+    type: Object,
+    required: true
   }
 })
 
-const emit = defineEmits(['update:params'])
+const emit = defineEmits(['update:params', 'update:roadSettings', 'road-mask-file', 'clear-road-mask'])
+
+const roadFileInput = ref(null)
+
+const roadColorPresets = [
+  { label: 'Asphalt', value: '#4a4a4a' },
+  { label: 'White', value: '#ffffff' },
+  { label: 'Yellow', value: '#facc15' },
+  { label: 'Orange', value: '#f97316' },
+  { label: 'Red', value: '#ef4444' },
+  { label: 'Cyan', value: '#22d3ee' },
+  { label: 'Lime', value: '#84cc16' }
+]
 
 function updateParam(key, value) {
   emit('update:params', { ...props.params, [key]: value })
+}
+
+function updateRoadSetting(key, value) {
+  emit('update:roadSettings', { ...props.roadSettings, [key]: value })
+}
+
+function handleRoadUpload(e) {
+  const file = e.target?.files?.[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = (ev) => {
+    emit('road-mask-file', ev.target?.result)
+  }
+  reader.readAsDataURL(file)
+  e.target.value = ''
+}
+
+function clearRoadMask() {
+  emit('clear-road-mask')
 }
 </script>

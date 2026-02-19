@@ -8,7 +8,11 @@
         :params="params"
         :is-processing="isProcessing"
         :image-dimensions="imageDimensions"
+        :road-settings="roadSettings"
         @update:params="params = $event"
+        @update:road-settings="roadSettings = $event"
+        @road-mask-file="loadRoadMask"
+        @clear-road-mask="clearRoadMask"
       />
 
       <!-- Viewport Area -->
@@ -111,6 +115,11 @@
                   class="block"
                   style="image-rendering: pixelated"
                 />
+                <canvas
+                  v-if="roadSettings.hasRoadMask"
+                  ref="roadCanvasEl"
+                  class="absolute inset-0 w-full h-full z-20 pointer-events-none"
+                />
               </div>
             </div>
 
@@ -200,8 +209,20 @@ const clusterCount = ref(null)
 const progress = ref(0)
 const imageDimensions = ref(null)
 
+// Road overlay state
+const roadSettings = ref({
+  hasRoadMask: false,
+  opacity: 0.85,
+  color: '#4a4a4a',
+  width: 1
+})
+let roadMaskBinary = null  // Uint8Array: 1 = road, 0 = not road
+let roadMaskW = 0
+let roadMaskH = 0
+
 const canvasEl = ref(null)
 const originalCanvasEl = ref(null)
+const roadCanvasEl = ref(null)
 const viewportEl = ref(null)
 const fileInputEl = ref(null)
 let originalImage = null
@@ -355,6 +376,11 @@ async function processImage() {
       controller.signal
     )
     clusterCount.value = clusters
+
+    // Re-draw road overlay on top after segmentation
+    if (roadSettings.value.hasRoadMask && roadMaskBinary) {
+      nextTick(() => drawRoadOverlay())
+    }
   } catch (error) {
     if (error.name === 'AbortError') return // superseded by newer request
     console.error("Processing error:", error)
@@ -374,6 +400,20 @@ watch(params, () => {
 function handleDownload() {
   if (!canvasEl.value) return
 
+  // Composite segmented + road overlay for export
+  const exportWithRoads = (srcCanvas) => {
+    if (roadSettings.value.hasRoadMask && roadCanvasEl.value) {
+      const comp = document.createElement('canvas')
+      comp.width = srcCanvas.width
+      comp.height = srcCanvas.height
+      const cCtx = comp.getContext('2d')
+      cCtx.drawImage(srcCanvas, 0, 0)
+      cCtx.drawImage(roadCanvasEl.value, 0, 0, comp.width, comp.height)
+      return comp
+    }
+    return srcCanvas
+  }
+
   // If canvas was capped, export at full original resolution
   if (displayScale < 1 && originalImage) {
     const fullCanvas = document.createElement('canvas')
@@ -382,17 +422,134 @@ function handleDownload() {
     const fCtx = fullCanvas.getContext('2d')
     fCtx.imageSmoothingEnabled = false
     fCtx.drawImage(canvasEl.value, 0, 0, originalImage.width, originalImage.height)
+    const final = exportWithRoads(fullCanvas)
     const link = document.createElement('a')
     link.download = `segmented-satellite-${Date.now()}.png`
-    link.href = fullCanvas.toDataURL('image/png')
+    link.href = final.toDataURL('image/png')
     link.click()
   } else {
+    const final = exportWithRoads(canvasEl.value)
     const link = document.createElement('a')
     link.download = `segmented-satellite-${Date.now()}.png`
-    link.href = canvasEl.value.toDataURL('image/png')
+    link.href = final.toDataURL('image/png')
     link.click()
   }
 }
+
+// ─── Road mask loading and rendering ─────────────────────────────────
+
+function loadRoadMask(dataUrl) {
+  const img = new Image()
+  img.onload = () => {
+    // Scale the mask to match the display canvas
+    const cw = canvasEl.value?.width || img.width
+    const ch = canvasEl.value?.height || img.height
+    roadMaskW = cw
+    roadMaskH = ch
+
+    // Draw mask to a temp canvas to extract pixel data
+    const tmp = document.createElement('canvas')
+    tmp.width = cw
+    tmp.height = ch
+    const tCtx = tmp.getContext('2d')
+    tCtx.imageSmoothingEnabled = true
+    tCtx.imageSmoothingQuality = 'high'
+    tCtx.drawImage(img, 0, 0, cw, ch)
+
+    const imgData = tCtx.getImageData(0, 0, cw, ch)
+    const px = imgData.data
+    const binary = new Uint8Array(cw * ch)
+
+    // Threshold: any pixel with brightness > 30 is a road
+    for (let i = 0; i < cw * ch; i++) {
+      const r = px[i * 4]
+      const g = px[i * 4 + 1]
+      const b = px[i * 4 + 2]
+      binary[i] = (r + g + b) > 90 ? 1 : 0
+    }
+
+    roadMaskBinary = binary
+    roadSettings.value = { ...roadSettings.value, hasRoadMask: true }
+    nextTick(() => drawRoadOverlay())
+  }
+  img.src = dataUrl
+}
+
+function clearRoadMask() {
+  roadMaskBinary = null
+  roadMaskW = 0
+  roadMaskH = 0
+  roadSettings.value = { ...roadSettings.value, hasRoadMask: false }
+  if (roadCanvasEl.value) {
+    const ctx = roadCanvasEl.value.getContext('2d')
+    ctx.clearRect(0, 0, roadCanvasEl.value.width, roadCanvasEl.value.height)
+  }
+}
+
+function dilateRoadMask(binary, w, h, radius) {
+  if (radius <= 1) return binary
+  const out = new Uint8Array(w * h)
+  const r = radius - 1
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let found = false
+      for (let dy = -r; dy <= r && !found; dy++) {
+        for (let dx = -r; dx <= r && !found; dx++) {
+          const nx = x + dx
+          const ny = y + dy
+          if (nx >= 0 && nx < w && ny >= 0 && ny < h && binary[ny * w + nx]) {
+            found = true
+          }
+        }
+      }
+      out[y * w + x] = found ? 1 : 0
+    }
+  }
+  return out
+}
+
+function drawRoadOverlay() {
+  if (!roadCanvasEl.value || !roadMaskBinary) return
+
+  const cw = canvasEl.value?.width || roadMaskW
+  const ch = canvasEl.value?.height || roadMaskH
+
+  roadCanvasEl.value.width = cw
+  roadCanvasEl.value.height = ch
+  const ctx = roadCanvasEl.value.getContext('2d')
+  ctx.clearRect(0, 0, cw, ch)
+
+  // Parse hex color
+  const hex = roadSettings.value.color
+  const cr = parseInt(hex.slice(1, 3), 16)
+  const cg = parseInt(hex.slice(3, 5), 16)
+  const cb = parseInt(hex.slice(5, 7), 16)
+  const alpha = Math.round(roadSettings.value.opacity * 255)
+
+  // Dilate if width > 1
+  const mask = dilateRoadMask(roadMaskBinary, roadMaskW, roadMaskH, roadSettings.value.width)
+
+  const imgData = ctx.createImageData(cw, ch)
+  const px = imgData.data
+
+  for (let i = 0; i < roadMaskW * roadMaskH; i++) {
+    if (mask[i]) {
+      px[i * 4] = cr
+      px[i * 4 + 1] = cg
+      px[i * 4 + 2] = cb
+      px[i * 4 + 3] = alpha
+    }
+  }
+
+  ctx.putImageData(imgData, 0, 0)
+}
+
+// Re-render road overlay when settings change (no reprocessing needed)
+watch(roadSettings, () => {
+  if (roadSettings.value.hasRoadMask && roadMaskBinary) {
+    drawRoadOverlay()
+  }
+}, { deep: true })
 
 watch(image, (newImage) => {
   if (!newImage) return
@@ -436,6 +593,13 @@ watch(image, (newImage) => {
     // Center and fit after the canvas is sized, then auto-segment
     nextTick(() => {
       fitToViewport()
+      // If a road mask is loaded, rescale it to the new canvas size
+      if (roadSettings.value.hasRoadMask && roadMaskBinary && (roadMaskW !== cw || roadMaskH !== ch)) {
+        // Re-extract from the existing mask by re-triggering load isn't possible,
+        // but the drawRoadOverlay will use the existing binary at the stored size.
+        // Since the canvas matches, just redraw.
+        drawRoadOverlay()
+      }
       processImage()
     })
   }
